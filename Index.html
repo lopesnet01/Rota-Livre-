@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Rota Livre Pro - Navegação & Inteligência</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+    
+    <style>
+        :root { --primary: #2c3e50; --accent: #3498db; --danger: #e74c3c; --success: #2ecc71; }
+        body { padding: 0; margin: 0; font-family: 'Segoe UI', Roboto, sans-serif; }
+        html, body, #map { height: 100%; width: 100vw; background-color: #f4f1ea; overflow: hidden; }
+
+        /* Painel Superior: Marca e Busca */
+        .top-interface {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            pointer-events: none;
+        }
+
+        .search-container {
+            background: white;
+            padding: 5px 15px;
+            border-radius: 30px;
+            display: flex;
+            align-items: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+            pointer-events: auto;
+        }
+
+        #search-input {
+            border: none;
+            width: 100%;
+            padding: 10px;
+            outline: none;
+            font-size: 16px;
+        }
+
+        /* Indicador de Distância e Voz */
+        #info-panel {
+            background: rgba(44, 62, 80, 0.9);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 15px;
+            font-size: 14px;
+            backdrop-filter: blur(5px);
+            display: none;
+            pointer-events: auto;
+        }
+
+        /* Botões Flutuantes */
+        .fab-container {
+            position: absolute;
+            bottom: 30px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            z-index: 1000;
+        }
+
+        .fab {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: none;
+            color: white;
+            font-size: 24px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #btn-voice { background-color: var(--accent); }
+        #btn-clear { background-color: var(--danger); display: none; }
+        #btn-location { background-color: var(--success); }
+
+        /* Popup de Experiência */
+        .exp-form { display: flex; flex-direction: column; gap: 8px; min-width: 200px; }
+        .exp-form input, .exp-form textarea { padding: 5px; border: 1px solid #ccc; border-radius: 4px; }
+        
+        .user-marker { border: 3px solid white; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+    </style>
+</head>
+<body>
+
+    <div class="top-interface">
+        <div class="search-container">
+            <span onclick="startVoiceSearch()" style="cursor:pointer">🎙️</span>
+            <input type="text" id="search-input" placeholder="Para onde vamos? (Ex: Hospital)">
+            <span onclick="manualSearch()">🔍</span>
+        </div>
+        <div id="info-panel">
+            <b>Distância:</b> <span id="dist-val">0</span> km | <b>Tempo:</b> <span id="time-val">0</span> min
+        </div>
+    </div>
+
+    <div class="fab-container">
+        <button id="btn-location" class="fab" onclick="toggleTracking()" title="Minha Localização">📍</button>
+        <button id="btn-voice" class="fab" onclick="startVoiceSearch()" title="Comando de Voz">🎤</button>
+        <button id="btn-clear" class="fab" onclick="limparMapa()">🗑️</button>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+    
+    <script>
+        // --- CONFIGURAÇÕES TÉCNICAS ---
+        const ORS_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImE2NTkxNmQ3MjhlOTQ3YThhZjIxNjk3MmVhYTYxZDI0IiwiaCI6Im11cm11cjY0In0'; // eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImE2NTkxNmQ3MjhlOTQ3YThhZjIxNjk3MmVhYTYxZDI0IiwiaCI6Im11cm11cjY0In0
+        const coordsIniciais = [-10.7350, -43.6330]; // Buritirama
+        let marcadores = [];
+        let rotaAtiva = null;
+        let userMarker = null;
+        let isTracking = false;
+        let watchID = null;
+
+        const map = L.map('map', { zoomControl: false, attributionControl: false }).setView(coordsIniciais, 15);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+        // --- SISTEMA DE VOZ (PT-BR) ---
+        const synth = window.speechSynthesis;
+        function falar(texto) {
+            const utter = new SpeechSynthesisUtterance(texto);
+            utter.lang = 'pt-BR';
+            synth.speak(utter);
+        }
+
+        function startVoiceSearch() {
+            const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+            recognition.lang = 'pt-BR';
+            falar("Estou ouvindo. Para onde deseja ir?");
+            
+            recognition.onresult = (event) => {
+                const comando = event.results[0][0].transcript;
+                document.getElementById('search-input').value = comando;
+                falar(`Buscando por ${comando}`);
+                executarBusca(comando);
+            };
+            recognition.start();
+        }
+
+        // --- BUSCA E IA DE COORDENADAS ---
+        const geocoder = L.Control.Geocoder.nominatim();
+
+        function manualSearch() {
+            executarBusca(document.getElementById('search-input').value);
+        }
+
+        function executarBusca(query) {
+            geocoder.geocode(query, (results) => {
+                if (results.length > 0) {
+                    const res = results[0];
+                    map.setView(res.center, 16);
+                    adicionarDestino(res.center, res.name);
+                } else {
+                    falar("Não encontrei esse local no mapa.");
+                }
+            });
+        }
+
+        // --- ROTEAMENTO E DISTÂNCIA ---
+        async function adicionarDestino(latlng, nome = "Destino") {
+            limparMapa(false);
+            const m = L.marker(latlng).addTo(map).bindPopup(`<b>${nome}</b><br>Clique para adicionar notas`).openPopup();
+            marcadores.push(m);
+            
+            if (userMarker) {
+                const de = userMarker.getLatLng();
+                calcularRota(de, latlng);
+            }
+            document.getElementById('btn-clear').style.display = 'flex';
+        }
+
+        async function calcularRota(de, para) {
+            const url = `https://api.openrouteservice.org/v2/directions/driving-car?api_key=${ORS_KEY}&start=${de.lng},${de.lat}&end=${para.lng},${para.lat}`;
+            
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                const route = data.features[0];
+                
+                // Cálculo de Distância e Tempo
+                const dist = (route.properties.summary.distance / 1000).toFixed(2);
+                const tempo = Math.round(route.properties.summary.duration / 60);
+                
+                document.getElementById('dist-val').innerText = dist;
+                document.getElementById('time-val').innerText = tempo;
+                document.getElementById('info-panel').style.display = 'block';
+                
+                falar(`Rota calculada. A distância é de ${dist} quilômetros, levando aproximadamente ${tempo} minutos.`);
+
+                const latLngs = route.geometry.coordinates.map(p => [p[1], p[0]]);
+                if (rotaAtiva) map.removeLayer(rotaAtiva);
+                rotaAtiva = L.polyline(latLngs, { color: '#3498db', weight: 6 }).addTo(map);
+                map.fitBounds(rotaAtiva.getBounds(), { padding: [50, 50] });
+            } catch (e) {
+                falar("Erro ao conectar com o serviço de rotas.");
+            }
+        }
+
+        // --- RASTREAMENTO EM TEMPO REAL (PONTO A -> PONTO B) ---
+        function toggleTracking() {
+            if (!isTracking) {
+                if ("geolocation" in navigator) {
+                    watchID = navigator.geolocation.watchPosition(updatePosition, (err) => falar("GPS indisponível"), {
+                        enableHighAccuracy: true
+                    });
+                    isTracking = true;
+                    document.getElementById('btn-location').style.backgroundColor = '#2ecc71';
+                    falar("Rastreamento ativo.");
+                }
+            } else {
+                navigator.geolocation.clearWatch(watchID);
+                isTracking = false;
+                document.getElementById('btn-location').style.backgroundColor = '#3498db';
+                falar("Rastreamento pausado.");
+            }
+        }
+
+        function updatePosition(pos) {
+            const { latitude, longitude } = pos.coords;
+            const latlng = [latitude, longitude];
+
+            if (!userMarker) {
+                userMarker = L.circleMarker(latlng, { 
+                    radius: 10, color: 'white', fillColor: '#3498db', fillOpacity: 1, weight: 3 
+                }).addTo(map);
+            } else {
+                userMarker.setLatLng(latlng);
+            }
+            
+            // Centraliza se o usuário se mover muito
+            if (isTracking) map.panTo(latlng);
+        }
+
+        // --- SALVAR NOTAS E FOTOS (LOCAL STORAGE) ---
+        map.on('contextmenu', function(e) {
+            const latlng = e.latlng;
+            const popupContent = `
+                <div class="exp-form">
+                    <strong>Nova Experiência</strong>
+                    <input type="text" id="exp-title" placeholder="Nome (Ex: Feira Livre)">
+                    <textarea id="exp-note" placeholder="O que achou deste local?"></textarea>
+                    <input type="file" id="exp-img" accept="image/*">
+                    <button onclick="saveExperience(${latlng.lat}, ${latlng.lng})">Salvar no Mapa</button>
+                </div>
+            `;
+            L.popup().setLatLng(latlng).setContent(popupContent).openOn(map);
+        });
+
+        function saveExperience(lat, lng) {
+            const title = document.getElementById('exp-title').value;
+            const note = document.getElementById('exp-note').value;
+            
+            // Aqui você integraria com Firebase Firestore. Por enquanto, criamos o marcador visual:
+            L.marker([lat, lng]).addTo(map)
+                .bindPopup(`<b>${title}</b><br>${note}<br><small>Salvo localmente</small>`)
+                .openPopup();
+            
+            falar(`Local ${title} adicionado à sua base de dados.`);
+        }
+
+        function limparMapa(completo = true) {
+            if (rotaAtiva) map.removeLayer(rotaAtiva);
+            if (completo) {
+                marcadores.forEach(m => map.removeLayer(m));
+                marcadores = [];
+                document.getElementById('info-panel').style.display = 'none';
+                document.getElementById('btn-clear').style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>
